@@ -13,6 +13,8 @@
   {cluster1,["node0", "node1", "node2"]}
 ]).
 
+-define(PORT, 8087)
+
 delete_all_buckets() ->
   error_logger:error_msg("Please specify a file ~n", []),
   {error, missing_file}.
@@ -40,7 +42,7 @@ delete_a_bucket(Bucket) ->
 
 delete_a_bucket(Bucket, Node) ->
   io:format("B:~p N:~p~n", [Bucket, Node]),
-  {ok, Pid} = riakc_pb_socket:start_link(Node, 8087),
+  {ok, Pid} = riakc_pb_socket:start_link(Node, ?PORT),
   riakc_pb_socket:stream_list_keys(Pid, Bucket),
   delete_loop(Pid, Bucket).
 
