@@ -9,8 +9,8 @@
 ]).
 
 -define(CLUSTERS, [
-  {rdn,["rdn-cskv-120", "rdn-cskv-121", "rdn-cskv-122"]},
-  {chi,["chi-cskv-120", "chi-cskv-121", "chi-cskv-122"]}
+  {cluster0,["node0", "node1", "node2"]},
+  {cluster1,["node0", "node1", "node2"]}
 ]).
 
 delete_all_buckets() ->
