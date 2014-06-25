@@ -23,9 +23,10 @@ delete_all_buckets(File) ->
   %% creating a randomized list from the file
   case file_to_list(File) of
     {ok, List} ->
-      {ok, RandomizedList} = randomize_list(List), 
+      {ok, RandomizedList} = randomize_list(List),
       %% iterating over buckets and spawning a process for each iteration
       lists:foreach(fun(Bucket) ->
+        %% spawning as many processes as many buckets in the list (72)
         spawn_link(fun() -> delete_a_bucket(Bucket) end)
       end, RandomizedList),
       {ok, deleted_all};
@@ -36,10 +37,17 @@ delete_all_buckets(File) ->
 
 delete_a_bucket(Bucket) ->
   lists:foreach(fun(Node) ->
+    %% spawning as many processes as many nodes we have in all clusters 
+    %% each process gets a the same bucket for deletion
     spawn_link(fun() -> delete_a_bucket(Bucket, Node) end)
+        %%read: [Node || for i in clusters,  {_,List} =i ; for j in List return j ; end ; end
   end, [Node || {_,List} <- ?CLUSTERS, Node <- List]),
   ok.
 
+%%gets a bucket and a node
+%%starts the Riak PB connection
+%%starts streaming the keys to self()
+%%usual selective receive processes the keys
 delete_a_bucket(Bucket, Node) ->
   io:format("B:~p N:~p~n", [Bucket, Node]),
   {ok, Pid} = riakc_pb_socket:start_link(Node, ?PORT),
@@ -59,8 +67,9 @@ delete_loop(Pid, Bucket) ->
       io:format("Got something else: ~p, terminating~n", [Else])
   end.
 
-
+%% helpers
 randomize_list(List) ->
+  %% from stackoverflow
   {ok, [X||{_,X} <- lists:sort([ {random:uniform(), N} || N <- List]) ]}.
   
 file_to_list(File) ->
@@ -68,8 +77,8 @@ file_to_list(File) ->
     %%if it is a file
     true ->
       case file:consult(File) of
+        %% List = [<<"bucket0">>, <<"bucket1">> ... ]
         {ok, List} ->
-          %%error_logger:info_msg("Bucket list is read from file: ~p~n", [File]),
           {ok, List};
         {error,Reason} ->
           error_logger:error_msg("Cannot open file: ~p Reason: ~p~n", [File, Reason]),
