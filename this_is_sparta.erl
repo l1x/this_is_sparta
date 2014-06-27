@@ -24,6 +24,7 @@ delete_all_buckets(File) ->
       {ok, RandomizedList} = randomize_list(List), 
       %% iterating over buckets 
       lists:foreach(fun(Bucket) -> delete_a_bucket(Bucket) end, RandomizedList),
+      set_alarm(500),
       delete_all_buckets_loop();
     %% could not open the file
     {error,Reason} ->
@@ -32,21 +33,34 @@ delete_all_buckets(File) ->
 
 delete_all_buckets_loop() ->
   receive
-    {Pid, started} -> 
+    {Pid, started, {perf, 0}} -> 
       %io:format("Got: ~p~n", [{Pid, started}]),
-      ets:insert(process_registry, {Pid, started}),
+      ets:insert(process_registry, {Pid, started, {perf, 0}}),
+      delete_all_buckets_loop();
+    {Pid, running, {perf, Perf}} ->
+      ets:insert(process_registry, {Pid, started, {perf, Perf}}),
       delete_all_buckets_loop();
     {'EXIT',Pid,_} ->
       %io:format("Got: ~p~n", [{'EXIT', Pid}]),
       ets:delete(process_registry, Pid),
       Len = length(ets:tab2list(process_registry)),
-      io:format("Current # of running processes:~p~n", [Len]),
       case Len of
         0 -> init:stop();
         _ -> delete_all_buckets_loop()
       end;
+    alarm ->
+      Len = length(ets:tab2list(process_registry)),
+      io:format("The current performance is: ~p req/s Running processes: ~p~n", [
+        lists:sum(lists:flatten(ets:select(process_registry,[{{'_','_',{'_','$1'}},[],['$$']}]))), Len
+      ]),
+      set_alarm(1000),
+      delete_all_buckets_loop();
     Else ->
       io:format("Got: ~p~n", [Else])
+  after
+    1000 -> 
+      %%io:format("Timeout: ~p~n", [timeout]),
+      delete_all_buckets_loop()
   end.
 
 delete_a_bucket(Bucket) ->
@@ -58,13 +72,13 @@ delete_a_bucket(Bucket) ->
   ok.
 
 delete_a_bucket(Bucket, Node, ParentPid) ->
-  ParentPid ! {self(),started},
-  io:format("B:~p N:~p PP:~p ~n", [Bucket, Node, ParentPid]),
+  io:format("Starting: ~p Bucket:~p Node:~p ParPid:~p ~n", [self(), Bucket, Node, ParentPid]),
+  ParentPid ! {self(), started, {perf, 0}},
   {ok, Pid} = riakc_pb_socket:start_link(Node, 8087),
   riakc_pb_socket:stream_list_keys(Pid, Bucket),
-  delete_loop(Pid, Bucket).
+  delete_loop(Pid, Bucket, ParentPid).
 
-delete_loop(Pid, Bucket) ->
+delete_loop(Pid, Bucket, ParentPid) ->
   receive
     {_, {_, List}} ->
       %%This is happening inside a process
@@ -79,14 +93,10 @@ delete_loop(Pid, Bucket) ->
         end, List) 
       end),
       ReqPerSec = req_per_sec(Time, Len),
-      NumProcesses = length(erlang:processes()),
-      io:format(
-        "# of deletes: ~p Time[ms] ~p Req/s: ~p NumProcesses: ~p Overall performance: ~p ~n", 
-        [Len, Time, ReqPerSec, NumProcesses, NumProcesses*ReqPerSec]
-      ),
-      delete_loop(Pid, Bucket);
+      ParentPid ! {self(), running, {perf, ReqPerSec}},
+      delete_loop(Pid, Bucket, ParentPid);
     {_, done} ->
-      io:format("Finished with all of the keys in the ~p bucket. Exiting process: ~p~n", [Bucket, self()]),
+      io:format("Finished with all of the keys in the ~p bucket.~nExiting process: ~p~n", [Bucket, self()]),
       exit("Bucket is done, terminating worker...");
     Else ->
       io:format("Got something else: ~p, terminating~n", [Else])
@@ -95,12 +105,21 @@ delete_loop(Pid, Bucket) ->
 req_per_sec(_Time, 0) ->
   0;
 req_per_sec(Time, Len) -> 
-  trunc(Time / 1000) / Len.
+  trunc((Time / 1000) / Len).
 
-print_dots() ->
-  io:format("~c", [46]),
-  timer:sleep(1),
-  io:format("~c~c~c", [13,13,13]).
+%%print_dots() ->
+%%  io:format("~c", [46]),
+%%  timer:sleep(1),
+%%  io:format("~c~c~c", [13,13,13]).
+
+set_alarm(T) ->
+  Pid = self(),
+  spawn_link(fun() -> set(Pid, T) end).
+
+set(Pid, T) ->
+  receive
+  after T -> Pid ! alarm
+  end.
 
 randomize_list(List) ->
   {ok, [X||{_,X} <- lists:sort([ {random:uniform(), N} || N <- List]) ]}.
