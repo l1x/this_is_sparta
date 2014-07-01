@@ -17,6 +17,16 @@ delete_all_buckets() ->
   {error, missing_file}.
 
 delete_all_buckets(File) ->
+  %% check if the file was previously processed
+  case filelib:is_file(string:concat(atom_to_list(File), ".done")) of
+    true ->
+      error_logger:error_msg("~p has been processed already... ~n", [File]),
+      timer:sleep(1000),
+      erlang:halt(0);
+    false ->
+      error_logger:info_msg("New file ~p~n", [File])
+  end,
+  %% creating a process registry
   ets:new(process_registry, [set, named_table]),
   %% creating a randomized list from the file
   case file_to_list(File) of
@@ -24,43 +34,49 @@ delete_all_buckets(File) ->
       {ok, RandomizedList} = randomize_list(List), 
       %% iterating over buckets 
       lists:foreach(fun(Bucket) -> delete_a_bucket(Bucket) end, RandomizedList),
-      set_alarm(500),
-      delete_all_buckets_loop();
+      set_alarm(2000),
+      delete_all_buckets_loop(File);
     %% could not open the file
-    {error,Reason} ->
-      {error,Reason}
+    {error, _Reason} ->
+      timer:sleep(1000),
+      erlang:halt(0)
   end.
 
-delete_all_buckets_loop() ->
+delete_all_buckets_loop(File) ->
   receive
     {Pid, started, {perf, 0}} -> 
       %io:format("Got: ~p~n", [{Pid, started}]),
       ets:insert(process_registry, {Pid, started, {perf, 0}}),
-      delete_all_buckets_loop();
+      delete_all_buckets_loop(File);
     {Pid, running, {perf, Perf}} ->
       ets:insert(process_registry, {Pid, started, {perf, Perf}}),
-      delete_all_buckets_loop();
+      delete_all_buckets_loop(File);
     {'EXIT',Pid,_} ->
       %io:format("Got: ~p~n", [{'EXIT', Pid}]),
       ets:delete(process_registry, Pid),
       Len = length(ets:tab2list(process_registry)),
       case Len of
-        0 -> init:stop();
-        _ -> delete_all_buckets_loop()
+        %% save .done file
+        0 ->
+          file:write_file( string:concat(atom_to_list(File), ".done") , "ok"),
+          init:stop();
+        _ -> 
+          delete_all_buckets_loop(File)
       end;
     alarm ->
       Len = length(ets:tab2list(process_registry)),
       io:format("The current performance is: ~p req/s Running processes: ~p~n", [
         lists:sum(lists:flatten(ets:select(process_registry,[{{'_','_',{'_','$1'}},[],['$$']}]))), Len
       ]),
-      set_alarm(1000),
-      delete_all_buckets_loop();
+      erlang:garbage_collect(self()),
+      set_alarm(2000),
+      delete_all_buckets_loop(File);
     Else ->
       io:format("Got: ~p~n", [Else])
   after
     1000 -> 
       %%io:format("Timeout: ~p~n", [timeout]),
-      delete_all_buckets_loop()
+      delete_all_buckets_loop(File)
   end.
 
 delete_a_bucket(Bucket) ->
@@ -79,6 +95,7 @@ delete_a_bucket(Bucket, Node, ParentPid) ->
   delete_loop(Pid, Bucket, ParentPid).
 
 delete_loop(Pid, Bucket, ParentPid) ->
+  erlang:garbage_collect(self()),
   receive
     {_, {_, List}} ->
       %%This is happening inside a process
@@ -88,7 +105,6 @@ delete_loop(Pid, Bucket, ParentPid) ->
       Len = length(List),
       {Time,_} = timer:tc(fun() ->
         lists:foreach(fun(K) -> 
-          %%print_dots(),
           riakc_pb_socket:delete(Pid, Bucket, K) 
         end, List) 
       end),
@@ -107,11 +123,6 @@ req_per_sec(_Time, 0) ->
 req_per_sec(Time, Len) -> 
   trunc((Time / 1000) / Len).
 
-%%print_dots() ->
-%%  io:format("~c", [46]),
-%%  timer:sleep(1),
-%%  io:format("~c~c~c", [13,13,13]).
-
 set_alarm(T) ->
   Pid = self(),
   spawn_link(fun() -> set(Pid, T) end).
@@ -123,7 +134,7 @@ set(Pid, T) ->
 
 randomize_list(List) ->
   {ok, [X||{_,X} <- lists:sort([ {random:uniform(), N} || N <- List]) ]}.
-  
+
 file_to_list(File) ->
   case filelib:is_file(File) of
     %%if it is a file
