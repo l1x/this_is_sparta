@@ -18,7 +18,7 @@
 
 -export([
   delete_all_buckets/0, 
-  delete_all_buckets/1 
+  delete_all_buckets/1
 ]).
 
 -define(CLUSTERS, [
@@ -30,31 +30,8 @@ delete_all_buckets() ->
   error_logger:error_msg("Please specify a file ~n", []),
   {error, missing_file}.
 
-delete_all_buckets(File) ->
-  %% check if the file was previously processed
-  case filelib:is_file(string:concat(atom_to_list(File), ".done")) of
-    true ->
-      error_logger:error_msg("~p has been processed already... ~n", [File]),
-      timer:sleep(1000),
-      erlang:halt(0);
-    false ->
-      error_logger:info_msg("New file ~p~n", [File])
-  end,
-  %% creating a process registry
-  ets:new(process_registry, [set, named_table]),
-  %% creating a randomized list from the file
-  case file_to_list(File) of
-    {ok, List} ->
-      {ok, RandomizedList} = randomize_list(List), 
-      %% iterating over buckets 
-      lists:foreach(fun(Bucket) -> delete_a_bucket(Bucket) end, RandomizedList),
-      set_alarm(2000),
-      delete_all_buckets_loop(File);
-    %% could not open the file
-    {error, _Reason} ->
-      timer:sleep(1000),
-      erlang:halt(0)
-  end.
+delete_all_buckets(Bucket) ->
+  {ok, ok}.
 
 delete_all_buckets_loop(File) ->
   receive
