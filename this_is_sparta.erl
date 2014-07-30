@@ -21,8 +21,7 @@
 ]).
 
 -define(CLUSTERS, [
-  {cluster0,["node0:port0", "node1:port1", "node2:port2"]},
-  {cluster1,["node0:port0", "node1:port1", "node2:port2"]}
+  {cluster0,["127.0.0.1:10017", "127.0.0.1:10027", "127.0.0.1:10037"]}
 ]).
 
 delete_all_buckets() ->
@@ -41,7 +40,7 @@ delete_all_buckets() ->
   lists:foreach(fun(Node) ->
     [Host, Port] = string:tokens(Node,":"),
     io:format("Connecting to host: ~p on port: ~p ~n", [Host, Port]),
-    case riakc_pb_socket:start_link(Host, Port) of
+    case riakc_pb_socket:start_link(Host, list_to_integer(Port)) of
       {ok, Pid} -> 
         error_logger:info_msg("Successfully connected to ~p~n", [Host]),
         ets:insert(connection_registry,{Host, Pid});
