@@ -25,6 +25,9 @@
   {cluster0,["127.0.0.1:10017", "127.0.0.1:10027", "127.0.0.1:10037"]}
 ]).
 
+-define(MIN_DAYS, 3).
+-define(MAX_DAYS, 90).
+
 delete_all_buckets() ->
   %% connects to Riak cluster 
   %% queries the to_be_deleted bucket for keys using 2i
@@ -50,6 +53,7 @@ delete_all_buckets() ->
 ok.
 
 create_connection_registry() ->
+  io:format("~p~n", [get_timestamp()]),
   ets:new(connection_registry, [bag, named_table]),
   {ok,created}.
 
@@ -132,6 +136,10 @@ load_fixtures() ->
   end, [T || T <- Buckets]),
   erlang:halt(0),
   ok.
+
+get_timestamp() ->
+    {Mega,Sec,_} = erlang:now(),
+    (Mega*1000000+Sec)*1000.
 
 %%
 %%bucket_deleted(Pid, Bucket, Key) ->
