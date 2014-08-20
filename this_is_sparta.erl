@@ -27,6 +27,7 @@
 
 -define(MIN_DAYS, 3).
 -define(MAX_DAYS, 90).
+-define(ONE_DAY_MS, 86400000).
 
 delete_all_buckets() ->
   %% connects to Riak cluster 
@@ -41,13 +42,35 @@ delete_all_buckets() ->
   {ok, connected} = connect_to_all_nodes(),
   %% get Pid to talk to Riak
   {ok, Pid} = get_connection_pid(),
-  %% listing keys with 2i
-  {ok, Keys} = list_keys_with_2i(Pid, <<"to_be_deleted">>, "created_at", 0, 9999999999999),
-  lists:foreach(fun(Key) -> 
-    io:format("~p~n", [Key]),
-    delete_keys_with_2i(Pid, Key, "created_at")
-  end, [Key || Key <- Keys]),
-  %{ok, Obj} = 
+
+  %% main loop
+  {ok, List_of_dates} = list_of_dates(),
+  %% get the partitioned list
+  Plist = part(List_of_dates),
+  %% iterates over  
+  lists:foreach(fun(Pair) ->
+    %% this is the safeguard for not allowing
+    %% incorrect input and making sure we get a 
+    %% range of the keys only
+    case Pair of
+      %% correct input, one list with two items
+      [_, _] ->
+        [Fst, Scnd] = Pair,
+        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
+        {ok, Buckets} = list_keys_with_2i(Pid, <<"to_be_deleted">>, "created_at", Fst, Scnd),
+        lists:foreach(fun(Bucket) ->
+          io:format("Bucket submitted for deletion: ~p~n", [Bucket]),
+          delete_keys_with_2i(Plist, Pid, Bucket, "created_at")
+        end, Buckets);
+      %% incorrect input
+      _ -> 
+        io:format("Incorrect input: ~p~n", [Pair])
+    end
+
+  end, Plist),
+   
+  %% main end
+
   timer:sleep(1000),
   erlang:halt(0),
 ok.
@@ -85,7 +108,7 @@ list_keys_with_2i(Pid, Bucket, Index, Min, Max) ->
   %% instead of getting all of the keys at once
   %% obvious cases should be captured
   %% Min < Max, Min > 0, Max > 0 etc
-  io:format("~p~n", [Bucket]),
+  io:format("Pid: ~p Bucket: ~p Index: ~p Min: ~p Max: ~p ~n", [Pid, Bucket, Index, Min, Max]),
   {ok,{_,List,_,_}} = riakc_pb_socket:get_index(
     Pid, 
     Bucket, 
@@ -93,12 +116,31 @@ list_keys_with_2i(Pid, Bucket, Index, Min, Max) ->
   ),
   {ok, List}.
 
-delete_keys_with_2i(Pid, Bucket, Index) ->
-  {ok, Keys} = list_keys_with_2i(Pid, Bucket, Index, 0, 9999999999999),
-  lists:foreach(fun(Key) ->
-    io:format("~p~n", [Key])
-  end, [Key || Key <- Keys]),
-  io:format("~p~p~p~n", [Pid, Bucket, Index]).
+%% this can be a spawn()
+delete_keys_with_2i(Plist, Pid, Bucket, Index) ->
+  %% iterating over Plist
+  %% each iteration lists a range of keys
+  %% and deletes them
+  lists:foreach(fun(Pair) ->
+    %% this is the safeguard for not allowing
+    %% incorrect input and making sure we get a
+    %% range of the keys only
+    case Pair of
+      %% correct input, one list with two items
+      [_, _] ->
+        [Fst, Scnd] = Pair,
+        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
+        {ok, Keys} = list_keys_with_2i(Pid, Bucket, Index, Fst, Scnd),
+        lists:foreach(fun(Key) ->
+          io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket])
+        end, Keys);
+      %% incorrect input
+      _ ->
+        io:format("Incorrect input: ~p~n", [Pair])
+    end
+  end, Plist),
+  ok.
+
 
 load_fixtures() ->
   %% Java is using milliseconds for timestamps
@@ -139,7 +181,25 @@ load_fixtures() ->
 
 get_timestamp() ->
     {Mega,Sec,_} = erlang:now(),
-    (Mega*1000000+Sec)*1000.
+    Ts = (Mega*1000000+Sec)*1000,
+    {ok, Ts}.
+
+list_of_dates() -> 
+  {ok, Ts} = get_timestamp(),
+  Max = Ts - (3 * ?ONE_DAY_MS),
+  Min = Max - (90 * ?ONE_DAY_MS),
+  List = lists:seq(Min,Max,?ONE_DAY_MS),
+  {ok, List}. 
+
+%% partitioning lists
+part(List) ->
+  part(List, []).
+part([], Acc) ->
+  lists:reverse(Acc);
+part([H], Acc) ->
+  lists:reverse([[H]|Acc]);
+part([H1,H2|T], Acc) ->
+  part(T, [[H1,H2]|Acc]).
 
 %%
 %%bucket_deleted(Pid, Bucket, Key) ->
