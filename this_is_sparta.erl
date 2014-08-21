@@ -17,152 +17,201 @@
 -author('leccine@gmail.com').
 
 -export([
-  delete_all_buckets/0, 
-  delete_all_buckets/1 
+  delete_all_buckets/0,
+  load_fixtures/0
 ]).
 
 -define(CLUSTERS, [
-  {cluster0,["node0", "node1", "node2"]},
-  {cluster1,["node0", "node1", "node2"]}
+  {cluster0,["127.0.0.1:10017", "127.0.0.1:10027", "127.0.0.1:10037"]}
 ]).
 
+-define(MIN_DAYS, 3).
+-define(MAX_DAYS, 90).
+-define(ONE_DAY_MS, 86400000).
+
 delete_all_buckets() ->
-  error_logger:error_msg("Please specify a file ~n", []),
-  {error, missing_file}.
+  %% connects to Riak cluster 
+  %% queries the to_be_deleted bucket for keys using 2i
+  %% if finds keys checks if they exist in has_been_deleted
+  %% if not deletes all of its keys and inserts it to the has_been_deleted
+  %% TODO: open multiple connection, run parallel in different clusters
 
-delete_all_buckets(File) ->
-  %% check if the file was previously processed
-  case filelib:is_file(string:concat(atom_to_list(File), ".done")) of
-    true ->
-      error_logger:error_msg("~p has been processed already... ~n", [File]),
-      timer:sleep(1000),
-      erlang:halt(0);
-    false ->
-      error_logger:info_msg("New file ~p~n", [File])
-  end,
-  %% creating a process registry
-  ets:new(process_registry, [set, named_table]),
-  %% creating a randomized list from the file
-  case file_to_list(File) of
-    {ok, List} ->
-      {ok, RandomizedList} = randomize_list(List), 
-      %% iterating over buckets 
-      lists:foreach(fun(Bucket) -> delete_a_bucket(Bucket) end, RandomizedList),
-      set_alarm(2000),
-      delete_all_buckets_loop(File);
-    %% could not open the file
-    {error, _Reason} ->
-      timer:sleep(1000),
-      erlang:halt(0)
-  end.
+  %% creating a connection registry
+  {ok, created} = create_connection_registry(),
+  %% connecting to Riak
+  {ok, connected} = connect_to_all_nodes(),
+  %% get Pid to talk to Riak
+  {ok, Pid} = get_connection_pid(),
 
-delete_all_buckets_loop(File) ->
-  receive
-    {Pid, started, {perf, 0}} -> 
-      %io:format("Got: ~p~n", [{Pid, started}]),
-      ets:insert(process_registry, {Pid, started, {perf, 0}}),
-      delete_all_buckets_loop(File);
-    {Pid, running, {perf, Perf}} ->
-      ets:insert(process_registry, {Pid, started, {perf, Perf}}),
-      delete_all_buckets_loop(File);
-    {'EXIT',Pid,_} ->
-      %io:format("Got: ~p~n", [{'EXIT', Pid}]),
-      ets:delete(process_registry, Pid),
-      Len = length(ets:tab2list(process_registry)),
-      case Len of
-        %% save .done file
-        0 ->
-          file:write_file( string:concat(atom_to_list(File), ".done") , "ok"),
-          init:stop();
-        _ -> 
-          delete_all_buckets_loop(File)
-      end;
-    alarm ->
-      Len = length(ets:tab2list(process_registry)),
-      io:format("The current performance is: ~p req/s Running processes: ~p~n", [
-        lists:sum(lists:flatten(ets:select(process_registry,[{{'_','_',{'_','$1'}},[],['$$']}]))), Len
-      ]),
-      erlang:garbage_collect(self()),
-      set_alarm(2000),
-      delete_all_buckets_loop(File);
-    Else ->
-      io:format("Got: ~p~n", [Else])
-  after
-    1000 -> 
-      %%io:format("Timeout: ~p~n", [timeout]),
-      delete_all_buckets_loop(File)
-  end.
+  %% main loop
+  {ok, List_of_dates} = list_of_dates(),
+  %% get the partitioned list
+  Plist = part(List_of_dates),
+  %% iterates over  
+  lists:foreach(fun(Pair) ->
+    %% this is the safeguard for not allowing
+    %% incorrect input and making sure we get a 
+    %% range of the keys only
+    case Pair of
+      %% correct input, one list with two items
+      [_, _] ->
+        [Fst, Scnd] = Pair,
+        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
+        {ok, Buckets} = list_keys_with_2i(Pid, <<"to_be_deleted">>, "created_at", Fst, Scnd),
+        lists:foreach(fun(Bucket) ->
+          io:format("Bucket submitted for deletion: ~p~n", [Bucket]),
+          delete_keys_with_2i(Plist, Pid, Bucket, "created_at")
+        end, Buckets);
+      %% incorrect input
+      _ -> 
+        io:format("Incorrect input: ~p~n", [Pair])
+    end
 
-delete_a_bucket(Bucket) ->
-  io:format("Deleting: ~p~n", [Bucket]),
-  Pid = self(),
+  end, Plist),
+   
+  %% main end
+
+  timer:sleep(1000),
+  erlang:halt(0),
+ok.
+
+create_connection_registry() ->
+  io:format("~p~n", [get_timestamp()]),
+  ets:new(connection_registry, [bag, named_table]),
+  {ok,created}.
+
+connect_to_all_nodes() ->
   lists:foreach(fun(Node) ->
-    spawn_link(fun() -> delete_a_bucket(Bucket, Node, Pid) end)
+    [Host, Port] = string:tokens(Node,":"),
+    io:format("Connecting to host: ~p on port: ~p ~n", [Host, Port]),
+    case riakc_pb_socket:start_link(Host, list_to_integer(Port)) of
+      {ok, Pid} ->
+        error_logger:info_msg("Successfully connected to ~p~n", [Host]),
+        ets:insert(connection_registry,{Host, Pid});
+      _ ->
+        error_logger:error_msg("Cannot connect to ~p", [Host]),
+        timer:sleep(1000),
+        erlang:halt(1)
+    end
   end, [Node || {_,List} <- ?CLUSTERS, Node <- List]),
+  {ok, connected}.
+
+get_connection_pid() ->
+  %%[{[Host],Pid}, {}, {}...]
+  ConnList = ets:tab2list(connection_registry),
+  Index = random:uniform(length(ConnList)),
+  {_,Pid} = lists:nth(Index,ConnList),
+  {ok, Pid}.
+
+list_keys_with_2i(Pid, Bucket, Index, Min, Max) ->
+  %% this has to take the from and to values
+  %% instead of getting all of the keys at once
+  %% obvious cases should be captured
+  %% Min < Max, Min > 0, Max > 0 etc
+  io:format("Pid: ~p Bucket: ~p Index: ~p Min: ~p Max: ~p ~n", [Pid, Bucket, Index, Min, Max]),
+  {ok,{_,List,_,_}} = riakc_pb_socket:get_index(
+    Pid, 
+    Bucket, 
+    {integer_index, Index}, Min, Max
+  ),
+  {ok, List}.
+
+%% this can be a spawn()
+delete_keys_with_2i(Plist, Pid, Bucket, Index) ->
+  %% iterating over Plist
+  %% each iteration lists a range of keys
+  %% and deletes them
+  lists:foreach(fun(Pair) ->
+    %% this is the safeguard for not allowing
+    %% incorrect input and making sure we get a
+    %% range of the keys only
+    case Pair of
+      %% correct input, one list with two items
+      [_, _] ->
+        [Fst, Scnd] = Pair,
+        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
+        {ok, Keys} = list_keys_with_2i(Pid, Bucket, Index, Fst, Scnd),
+        lists:foreach(fun(Key) ->
+          io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket]),
+          %%deleting the key from the bucket
+          riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}]),
+
+          %%inserting 
+          %%riak_pb_socket:put -> has_been_deleted
+
+        end, Keys);
+      %% incorrect input
+      _ ->
+        io:format("Incorrect input: ~p~n", [Pair])
+    end
+  end, Plist),
   ok.
 
-delete_a_bucket(Bucket, Node, ParentPid) ->
-  io:format("Starting: ~p Bucket:~p Node:~p ParPid:~p ~n", [self(), Bucket, Node, ParentPid]),
-  ParentPid ! {self(), started, {perf, 0}},
-  {ok, Pid} = riakc_pb_socket:start_link(Node, 8087),
-  riakc_pb_socket:stream_list_keys(Pid, Bucket),
-  delete_loop(Pid, Bucket, ParentPid).
 
-delete_loop(Pid, Bucket, ParentPid) ->
-  erlang:garbage_collect(self()),
-  receive
-    {_, {_, List}} ->
-      %%This is happening inside a process
-      %%so doing synchronous sequential deletes are ok
-      %%if not use pmap instead of foreach with callbacks 
-      %%start timer
-      Len = length(List),
-      {Time,_} = timer:tc(fun() ->
-        lists:foreach(fun(K) -> 
-          riakc_pb_socket:delete(Pid, Bucket, K) 
-        end, List) 
-      end),
-      ReqPerSec = req_per_sec(Time, Len),
-      ParentPid ! {self(), running, {perf, ReqPerSec}},
-      delete_loop(Pid, Bucket, ParentPid);
-    {_, done} ->
-      io:format("Finished with all of the keys in the ~p bucket.~nExiting process: ~p~n", [Bucket, self()]),
-      exit("Bucket is done, terminating worker...");
-    Else ->
-      io:format("Got something else: ~p, terminating~n", [Else])
-  end.
+load_fixtures() ->
+  %% Java is using milliseconds for timestamps
+  %%
+  %% Timestamps:
+  %% 
+  %% 1407213871425 Mon Aug 04 2014 21:44:31 GMT-0700 (PDT)
+  %% 1407223871425 Tue Aug 05 2014 00:31:11 GMT-0700 (PDT)
+  %% 1407323871425 Wed Aug 06 2014 04:17:51 GMT-0700 (PDT)
+  %% 1407465976425 Thu Aug 07 2014 19:46:16 GMT-0700 (PDT) 
+  %%
+  %% Real buckets for deletion:
+  %% 808eb9bd4473db38-test-1407449017112 808eb9bd4473db38-test-1406174465901 etc.
+  %% 
+  %% riakc_obj:new(<<"bucket">>, <<"key">>, <<"data">>).
+  %% creating a connection registry
+  {ok, created} = create_connection_registry(),
+  %% connecting to Riak
+  {ok, connected} = connect_to_all_nodes(),
+  %% get Pid to talk to Riak
+  {ok, Pid} = get_connection_pid(),
+  Buckets = [
+    {<<"808eb9bd4473db38-test-1407449017112">>, 1407213871425},
+    {<<"808eb9bd4473db38-test-1406174465901">>, 1407223871425},
+    {<<"808eb9bd4473db38-test-1407450065843">>, 1407323871425},
+    {<<"808eb9bd4473db38-test-1408451096759">>, 1407465976425}
+  ],
+  lists:foreach(fun(T) ->
+    {Key, Ts} = T,
+    io:format("Key: ~p Timestamp: ~p~n", [Key, Ts]),
+    Obj0 = riakc_obj:new(<<"to_be_deleted">>, Key, <<"{\"ts\": 1407213871425}">>),
+    %%Obj1 = riakc_obj:get_update_metadata(Obj0),
+    %%Obj2 = riakc_obj:set_secondary_index(Obj0, [{{integer_index, "created_at"}, [Ts]}]),
+    riakc_pb_socket:put(Pid, Obj0)
+  end, [T || T <- Buckets]),
+  erlang:halt(0),
+  ok.
 
-req_per_sec(_Time, 0) ->
-  0;
-req_per_sec(Time, Len) -> 
-  trunc((Time / 1000) / Len).
+get_timestamp() ->
+    {Mega,Sec,_} = erlang:now(),
+    Ts = (Mega*1000000+Sec)*1000,
+    {ok, Ts}.
 
-set_alarm(T) ->
-  Pid = self(),
-  spawn_link(fun() -> set(Pid, T) end).
+list_of_dates() -> 
+  {ok, Ts} = get_timestamp(),
+  Max = Ts - (3 * ?ONE_DAY_MS),
+  Min = Max - (90 * ?ONE_DAY_MS),
+  List = lists:seq(Min,Max,?ONE_DAY_MS),
+  {ok, List}. 
 
-set(Pid, T) ->
-  receive
-  after T -> Pid ! alarm
-  end.
+%% partitioning lists
+part(List) ->
+  part(List, []).
+part([], Acc) ->
+  lists:reverse(Acc);
+part([H], Acc) ->
+  lists:reverse([[H]|Acc]);
+part([H1,H2|T], Acc) ->
+  part(T, [[H1,H2]|Acc]).
 
-randomize_list(List) ->
-  {ok, [X||{_,X} <- lists:sort([ {random:uniform(), N} || N <- List]) ]}.
+%%
+%%bucket_deleted(Pid, Bucket, Key) ->
+%%  {ok, Obj} = riakc_pb_socket:get(Pid, Bucket, Key),
+%%  {ok, Obj}.
 
-file_to_list(File) ->
-  case filelib:is_file(File) of
-    %%if it is a file
-    true ->
-      case file:consult(File) of
-        {ok, List} ->
-          %%error_logger:info_msg("Bucket list is read from file: ~p~n", [File]),
-          {ok, List};
-        {error,Reason} ->
-          error_logger:error_msg("Cannot open file: ~p Reason: ~p~n", [File, Reason]),
-          {error,Reason}
-      end;
-    %if it is NOT a file
-    false ->
-      error_logger:error_msg("Not a file: ~p~n", [File]),
-      {error, not_a_file}
-  end.
+  %{ok, Pid} = riakc_pb_socket:start_link("127.0.0.1", 8087).
+  %{ok, O} = riakc_pb_socket:get(Pid, <<"groceries">>, <<"mine">>).
+  %riakc_pb_socket:get_bucket(Pid, <<"groceries">>).
