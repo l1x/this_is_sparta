@@ -17,8 +17,7 @@
 -author('leccine@gmail.com').
 
 -export([
-  delete_all_buckets/0,
-  load_fixtures/0
+  delete_all_buckets/0
 ]).
 
 -define(CLUSTERS, [
@@ -56,11 +55,19 @@ delete_all_buckets() ->
       %% correct input, one list with two items
       [_, _] ->
         [Fst, Scnd] = Pair,
-        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
+        %%io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
         {ok, Buckets} = list_keys_with_2i(Pid, <<"to_be_deleted">>, "created_at", Fst, Scnd),
         lists:foreach(fun(Bucket) ->
           io:format("Bucket submitted for deletion: ~p~n", [Bucket]),
-          delete_keys_with_2i(Plist, Pid, Bucket, "created_at")
+          delete_keys_with_2i(Plist, Pid, Bucket, "created_at"),
+          %% adding the name of the bucket as a key to the has_been_deleted bucket
+          {ok, Ts} = get_timestamp(),
+          Json = "{\"ts\":" ++ integer_to_list(Ts) ++ "}",
+          Obj0 = riakc_obj:new(<<"has_been_deleted">>, Bucket, list_to_binary(Json)),
+          Md0 = riakc_obj:get_update_metadata(Obj0),
+          Md1 = riakc_obj:set_secondary_index(Md0, [{{integer_index, "created_at"}, [Ts]}]),
+          Obj1 = riakc_obj:update_metadata(Obj0,Md1),
+          riakc_pb_socket:put(Pid, Obj1)
         end, Buckets);
       %% incorrect input
       _ -> 
@@ -103,18 +110,61 @@ get_connection_pid() ->
   {_,Pid} = lists:nth(Index,ConnList),
   {ok, Pid}.
 
+%% this is returning {ok, List}
 list_keys_with_2i(Pid, Bucket, Index, Min, Max) ->
   %% this has to take the from and to values
   %% instead of getting all of the keys at once
   %% obvious cases should be captured
   %% Min < Max, Min > 0, Max > 0 etc
-  io:format("Pid: ~p Bucket: ~p Index: ~p Min: ~p Max: ~p ~n", [Pid, Bucket, Index, Min, Max]),
+  %% io:format("Pid: ~p Bucket: ~p Index: ~p Min: ~p Max: ~p ~n", [Pid, Bucket, Index, Min, Max]),
   {ok,{_,List,_,_}} = riakc_pb_socket:get_index(
     Pid, 
     Bucket, 
-    {integer_index, Index}, Min, Max
-  ),
+    {integer_index, Index}, Min, Max),
   {ok, List}.
+
+list_keys_with_2i(Pid, Bucket, Index, Min, Max, Maxresults) ->
+  %% this is returning {ok, List, Continuation}
+  %% if the continuation is undefinied you reached the end of the key range
+  {ok,{_,List,_, Continuation}} = riakc_pb_socket:get_index_range(
+    Pid, Bucket, 
+    {integer_index, Index}, Min, Max,
+    [{max_results, Maxresults}]),
+  {ok, List, Continuation}.
+
+list_keys_with_2i(Pid, Bucket, Index, Min, Max, Maxresults, Cont) ->
+  %% this is returning {ok, List, Continuation}
+  %% if the continuation is undefinied you reached the end of the key range
+  %%{ok,{index_results_v1,
+  %%  [<<"908eb9bd4473db38-test-1406913729350">>,<<"908eb9bd4473db38-test-1407000129350">>],
+  %%  undefined,
+  %%  <<"g2gCbgYARi++l0cBbQAAACM5MDhlYjliZDQ0NzNkYjM4LXRlc3QtMTQwNzAwMDEyOTM1MA==">>}}
+  {ok,{_,List,_, Contnext}} = riakc_pb_socket:get_index_range(
+    Pid, Bucket, 
+    {integer_index, Index}, Min, Max,
+    [{max_results, Maxresults}, {continuation, Cont}]),
+  {ok, List, Contnext}.
+
+delete_keys_with_2i_loop(Pid, Bucket, Index, Fst, Scnd, Maxresults) -> 
+  {ok, Keys, Cont} = list_keys_with_2i(Pid, Bucket, Index, Fst, Scnd, Maxresults),
+  lists:foreach(fun(Key) ->
+    %%io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket]),
+    %%deleting the key from the bucket
+    riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}])
+  end, Keys),
+  delete_keys_with_2i_loop(Pid, Bucket, Index, Fst, Scnd, Maxresults, Cont).
+
+delete_keys_with_2i_loop(_Pid, _Bucket, _Index, _Fst, _Scnd, _Maxresults, undefined) ->
+  %% this is the exit point
+  {ok, done};
+delete_keys_with_2i_loop(Pid, Bucket, Index, Fst, Scnd, Maxresults, Cont) ->
+  {ok, Keys, Contnext} = list_keys_with_2i(Pid, Bucket, Index, Fst, Scnd, Maxresults, Cont),
+  lists:foreach(fun(Key) ->
+    io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket]),
+    %%deleting the key from the bucket
+    riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}])
+  end, Keys),
+  delete_keys_with_2i_loop(Pid, Bucket, Index, Fst, Scnd, Maxresults,Contnext).
 
 %% this can be a spawn()
 delete_keys_with_2i(Plist, Pid, Bucket, Index) ->
@@ -129,60 +179,16 @@ delete_keys_with_2i(Plist, Pid, Bucket, Index) ->
       %% correct input, one list with two items
       [_, _] ->
         [Fst, Scnd] = Pair,
-        io:format("1st: ~p 2nd: ~p~n", [Fst, Scnd]),
-        {ok, Keys} = list_keys_with_2i(Pid, Bucket, Index, Fst, Scnd),
-        lists:foreach(fun(Key) ->
-          io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket]),
-          %%deleting the key from the bucket
-          riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}])
-
-          %%inserting 
-          %%riak_pb_socket:put -> has_been_deleted
-
-        end, Keys);
+        %% this can be moved to a separate spawn() so
+        %% the keys can be streamed and received
+        %% while the continuation is not undefinied
+        {ok,done} = delete_keys_with_2i_loop(Pid, Bucket, Index, Fst, Scnd, 100);
       %% incorrect input
       _ ->
-        io:format("Incorrect input: ~p~n", [Pair])
+        %%io:format("Incorrect input: ~p~n", [Pair]),
+        ok
     end
   end, Plist),
-  ok.
-
-
-load_fixtures() ->
-  %% Java is using milliseconds for timestamps
-  %%
-  %% Timestamps:
-  %% 
-  %% 1407213871425 Mon Aug 04 2014 21:44:31 GMT-0700 (PDT)
-  %% 1407223871425 Tue Aug 05 2014 00:31:11 GMT-0700 (PDT)
-  %% 1407323871425 Wed Aug 06 2014 04:17:51 GMT-0700 (PDT)
-  %% 1407465976425 Thu Aug 07 2014 19:46:16 GMT-0700 (PDT) 
-  %%
-  %% Real buckets for deletion:
-  %% 808eb9bd4473db38-test-1407449017112 808eb9bd4473db38-test-1406174465901 etc.
-  %% 
-  %% riakc_obj:new(<<"bucket">>, <<"key">>, <<"data">>).
-  %% creating a connection registry
-  {ok, created} = create_connection_registry(),
-  %% connecting to Riak
-  {ok, connected} = connect_to_all_nodes(),
-  %% get Pid to talk to Riak
-  {ok, Pid} = get_connection_pid(),
-  Buckets = [
-    {<<"808eb9bd4473db38-test-1407449017112">>, 1407213871425},
-    {<<"808eb9bd4473db38-test-1406174465901">>, 1407223871425},
-    {<<"808eb9bd4473db38-test-1407450065843">>, 1407323871425},
-    {<<"808eb9bd4473db38-test-1408451096759">>, 1407465976425}
-  ],
-  lists:foreach(fun(T) ->
-    {Key, Ts} = T,
-    io:format("Key: ~p Timestamp: ~p~n", [Key, Ts]),
-    Obj0 = riakc_obj:new(<<"to_be_deleted">>, Key, <<"{\"ts\": 1407213871425}">>),
-    %%Obj1 = riakc_obj:get_update_metadata(Obj0),
-    %%Obj2 = riakc_obj:set_secondary_index(Obj0, [{{integer_index, "created_at"}, [Ts]}]),
-    riakc_pb_socket:put(Pid, Obj0)
-  end, [T || T <- Buckets]),
-  erlang:halt(0),
   ok.
 
 get_timestamp() ->
@@ -191,6 +197,8 @@ get_timestamp() ->
     {ok, Ts}.
 
 list_of_dates() -> 
+  %% returns a list of dates we need to
+  %% delete the data of
   {ok, Ts} = get_timestamp(),
   Max = Ts - (3 * ?ONE_DAY_MS),
   Min = Max - (90 * ?ONE_DAY_MS),
@@ -207,11 +215,4 @@ part([H], Acc) ->
 part([H1,H2|T], Acc) ->
   part(T, [[H1,H2]|Acc]).
 
-%%
-%%bucket_deleted(Pid, Bucket, Key) ->
-%%  {ok, Obj} = riakc_pb_socket:get(Pid, Bucket, Key),
-%%  {ok, Obj}.
-
-  %{ok, Pid} = riakc_pb_socket:start_link("127.0.0.1", 8087).
-  %{ok, O} = riakc_pb_socket:get(Pid, <<"groceries">>, <<"mine">>).
-  %riakc_pb_socket:get_bucket(Pid, <<"groceries">>).
+%% end

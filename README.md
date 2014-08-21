@@ -5,14 +5,19 @@ Compiling the Erlang client
 Assuming you are on CentOS/RedHat:
 
 Erlang
-    https://www.erlang-solutions.com/downloads/download-erlang-otp
-    yum install esl-erlang-R15B03-2.x86_64
-    Riak Client
+```  
+ https://www.erlang-solutions.com/downloads/download-erlang-otp
+ yum install esl-erlang-R15B03-2.x86_64
+ Riak Client
+```
+
 Few dev libs might need to be installed
-    wget https://github.com/basho/riak-erlang-client/archive/1.4.2.zip
-    unzip 1.4.2.zip
-    cd riak-erlang-client-1.4.2/
-    make
+```
+wget https://github.com/basho/riak-erlang-client/archive/1.4.2.zip
+unzip 1.4.2.zip
+cd riak-erlang-client-1.4.2/
+make
+```
 
 Delete all the keys in a defined list of buckets in Riak
 
@@ -24,6 +29,8 @@ erl \
 -eval "this_is_sparta:delete_all_buckets()"
 ```
 
-The list file is using the Erlang binary syntax for strings 
+It goes to "to_be_deleted" bucket and using the "created_at" index starts to walk back in time from 3 days ago till 90 days ago and deletes 1 day worth of data at once. This might be revised and further adjusted if 1 day resolution is not good.
 
-    <<string>>.
+ 
+
+
