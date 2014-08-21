@@ -134,7 +134,7 @@ delete_keys_with_2i(Plist, Pid, Bucket, Index) ->
         lists:foreach(fun(Key) ->
           io:format("Deleting the following key: ~p in bucket: ~p ~n", [Key, Bucket]),
           %%deleting the key from the bucket
-          riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}]),
+          riakc_pb_socket:delete(Pid, Bucket, Key,[{rw, 3}])
 
           %%inserting 
           %%riak_pb_socket:put -> has_been_deleted
