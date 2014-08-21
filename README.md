@@ -29,6 +29,8 @@ erl \
 -eval "this_is_sparta:delete_all_buckets()"
 ```
 
-The list file is using the Erlang binary syntax for strings 
+It goes to "to_be_deleted" bucket and using the "created_at" index starts to walk back in time from 3 days ago till 90 days ago and deletes 1 day worth of data at once. This might be revised and further adjusted if 1 day resolution is not good.
 
-    <<string>>.
+ 
+
+
